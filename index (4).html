@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Suit & Ball — Ping Pong</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#0e1117;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    min-height:100vh;
+    font-family:'Georgia',serif;
+    color:#e8e2d4;
+    overflow:hidden;
+    user-select:none;
+  }
+  #title{
+    font-size:.75rem;letter-spacing:.45em;text-transform:uppercase;
+    color:#4a4030;margin-bottom:12px;font-family:'Courier New',monospace;
+  }
+  #wrap{position:relative;}
+  canvas{display:block;border:1px solid #1e1a14;}
+  #overlay{
+    position:absolute;inset:0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+    background:rgba(10,9,7,.92);
+  }
+  #overlay h2{font-size:2rem;letter-spacing:.08em;color:#f0e6c8;font-weight:700;}
+  #overlay .sub{font-size:.72rem;letter-spacing:.18em;text-transform:uppercase;color:#5a5040;line-height:2.2;text-align:center;}
+  #overlay .winner-tag{font-size:.65rem;letter-spacing:.28em;text-transform:uppercase;color:#c9a84c;margin-bottom:-6px;}
+  .score-display{font-size:1.1rem;color:#8a7a60;letter-spacing:.1em;}
+  #mode-row{display:flex;gap:10px;margin-top:4px;}
+  .btn{
+    padding:10px 30px;background:transparent;
+    border:1px solid #c9a84c;color:#c9a84c;
+    font-family:'Courier New',monospace;font-size:.72rem;
+    letter-spacing:.18em;text-transform:uppercase;
+    cursor:pointer;transition:background .16s,color .16s;
+  }
+  .btn:hover,.btn.active{background:#c9a84c;color:#0e1117;}
+  #hint{
+    margin-top:10px;font-size:.62rem;letter-spacing:.1em;
+    color:#2a2520;font-family:'Courier New',monospace;text-align:center;line-height:2;
+  }
+</style>
+</head>
+<body>
+
+<div id="title">Suit &amp; Ball</div>
+
+<div id="wrap">
+  <canvas id="c" width="760" height="500"></canvas>
+
+  <div id="overlay">
+    <h2>SUIT &amp; BALL</h2>
+    <div class="sub">
+      W / S &nbsp;·&nbsp; Left player<br>
+      ↑ / ↓ &nbsp;·&nbsp; Right player (2P)<br>
+      First to 7 wins &nbsp;·&nbsp; P to pause
+    </div>
+    <div id="mode-row">
+      <button class="btn active" id="b1p" onclick="setMode(1)">vs CPU</button>
+      <button class="btn" id="b2p" onclick="setMode(2)">2 Players</button>
+    </div>
+    <button class="btn" style="margin-top:6px" onclick="startGame()">START MATCH</button>
+  </div>
+</div>
+
+<div id="hint">W / S &nbsp;·&nbsp; Left &nbsp;|&nbsp; ↑ / ↓ &nbsp;·&nbsp; Right &nbsp;|&nbsp; P &nbsp;·&nbsp; Pause</div>
+
+<script>
+// ─── Canvas / state ────────────────────────────────────────────
+const cv = document.getElementById('c');
+const cx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const overlay = document.getElementById('overlay');
+
+let mode = 1, running = false, paused = false, animId;
+let lp, rp, ball, scores, keys, particles, celebrating;
+
+// ─── Audio (Web Audio API — no files needed) ───────────────────
+let audioCtx;
+function getAudio(){
+  if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  return audioCtx;
+}
+function beep(freq, dur, type='square', vol=0.18){
+  try{
+    const ac = getAudio();
+    const o = ac.createOscillator();
+    const g = ac.createGain();
+    o.connect(g); g.connect(ac.destination);
+    o.type = type; o.frequency.value = freq;
+    g.gain.setValueAtTime(vol, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+    o.start(); o.stop(ac.currentTime + dur);
+  }catch(e){}
+}
+const sndHit   = () => beep(320, .07, 'square', .22);
+const sndWall  = () => beep(200, .06, 'sine',   .15);
+const sndScore = () => { beep(523,.12,'sine',.25); setTimeout(()=>beep(659,.18,'sine',.2),120); }
+const sndWin   = () => {
+  [523,659,784,1047].forEach((f,i)=>setTimeout(()=>beep(f,.22,'sine',.28),i*110));
+};
+
+// ─── Paddle + ball sizes ───────────────────────────────────────
+const PW=12, PH=90, BR=8;
+const WIN=7;
+const CHAR_W=44, CHAR_H=110; // character bounding box
+
+// ─── Init ──────────────────────────────────────────────────────
+function initGame(){
+  scores={l:0,r:0}; particles=[]; celebrating=null;
+  lp={x:52, y:H/2-PH/2, w:PW, h:PH};
+  rp={x:W-52-PW, y:H/2-PH/2, w:PW, h:PH};
+  keys={};
+  resetBall(1);
+}
+
+function resetBall(dir=1){
+  const ang=(Math.random()*50-25)*Math.PI/180;
+  const spd=5.5+Math.min((scores.l+scores.r)*.15,4);
+  ball={x:W/2, y:H/2, vx:Math.cos(ang)*spd*dir, vy:Math.sin(ang)*spd, trail:[]};
+}
+
+function setMode(m){
+  mode=m;
+  document.getElementById('b1p').classList.toggle('active',m===1);
+  document.getElementById('b2p').classList.toggle('active',m===2);
+}
+
+function startGame(){
+  overlay.style.display='none';
+  initGame(); running=true; paused=false;
+  cancelAnimationFrame(animId); loop();
+}
+
+// ─── Input ─────────────────────────────────────────────────────
+document.addEventListener('keydown',e=>{
+  keys[e.key]=true;
+  if(e.key==='p'||e.key==='P') togglePause();
+  if(['ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
+});
+document.addEventListener('keyup',e=>{ keys[e.key]=false; });
+
+function togglePause(){
+  if(!running) return;
+  paused=!paused;
+  if(!paused) loop();
+}
+
+// ─── Physics ───────────────────────────────────────────────────
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const SPD=6;
+
+function update(){
+  // left paddle
+  if(keys['w']||keys['W']) lp.y-=SPD;
+  if(keys['s']||keys['S']) lp.y+=SPD;
+  lp.y=clamp(lp.y,0,H-PH);
+
+  // right paddle
+  if(mode===2){
+    if(keys['ArrowUp'])   rp.y-=SPD;
+    if(keys['ArrowDown']) rp.y+=SPD;
+    rp.y=clamp(rp.y,0,H-PH);
+  } else {
+    // AI
+    const target=ball.y-PH/2;
+    const diff=target-rp.y;
+    const aiSpd=3.8+Math.min((scores.l+scores.r)*.08,2);
+    rp.y+=Math.sign(diff)*Math.min(Math.abs(diff),aiSpd);
+    rp.y=clamp(rp.y,0,H-PH);
+  }
+
+  // ball trail
+  ball.trail.push({x:ball.x,y:ball.y});
+  if(ball.trail.length>12) ball.trail.shift();
+
+  ball.x+=ball.vx; ball.y+=ball.vy;
+
+  // wall bounce
+  if(ball.y-BR<=0){ball.y=BR;ball.vy*=-1;sndWall();sparks(ball.x,ball.y,'#ff4444');}
+  if(ball.y+BR>=H){ball.y=H-BR;ball.vy*=-1;sndWall();sparks(ball.x,ball.y,'#ff4444');}
+
+  // paddle hit
+  if(hits(ball,lp)){reflect(ball,lp,1);sndHit();}
+  if(hits(ball,rp)){reflect(ball,rp,-1);sndHit();}
+
+  // score
+  if(ball.x<0){scores.r++;afterScore(-1);}
+  if(ball.x>W){scores.l++;afterScore(1);}
+
+  // particles
+  particles.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=.05;p.life-=.025;});
+  particles=particles.filter(p=>p.life>0);
+}
+
+function hits(b,p){
+  return b.x-b.r<p.x+p.w && b.x+b.r>p.x && b.y-b.r<p.y+p.h && b.y+b.r>p.y;
+}
+function reflect(b,p,dir){
+  const rel=(b.y-(p.y+p.h/2))/(p.h/2);
+  const ang=rel*62*Math.PI/180;
+  const spd=Math.min(Math.hypot(b.vx,b.vy)*1.06,18);
+  b.vx=Math.cos(ang)*spd*dir;
+  b.vy=Math.sin(ang)*spd;
+  b.x=dir===1?p.x+p.w+b.r:p.x-b.r;
+  sparks(b.x,b.y,'#ffaaaa');
+}
+function afterScore(nd){
+  sndScore();
+  sparks(ball.x,ball.y,'#ffd700',20);
+  if(scores.l>=WIN||scores.r>=WIN){endGame();}
+  else resetBall(nd);
+}
+function sparks(x,y,col,n=12){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2, s=Math.random()*4+1;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:1,color:col});
+  }
+}
+
+function endGame(){
+  running=false;
+  sndWin();
+  celebrating = scores.l>=WIN ? 'left' : 'right';
+  const wname = scores.l>=WIN ? (mode===2?'Player 1':'You') : (mode===2?'Player 2':'CPU');
+  overlay.innerHTML=`
+    <span class="winner-tag">Winner</span>
+    <h2>${wname}</h2>
+    <div class="score-display">${scores.l} — ${scores.r}</div>
+    <div id="mode-row">
+      <button class="btn ${mode===1?'active':''}" onclick="setMode(1)">vs CPU</button>
+      <button class="btn ${mode===2?'active':''}" onclick="setMode(2)">2 Players</button>
+    </div>
+    <button class="btn" style="margin-top:6px" onclick="startGame()">REMATCH</button>
+  `;
+  overlay.style.display='flex';
+}
+
+// ─── Draw helpers ──────────────────────────────────────────────
+function rr(x,y,w,h,r,fill,stroke,sw=0){
+  cx.beginPath();
+  cx.moveTo(x+r,y);
+  cx.lineTo(x+w-r,y); cx.quadraticCurveTo(x+w,y,x+w,y+r);
+  cx.lineTo(x+w,y+h-r); cx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  cx.lineTo(x+r,y+h); cx.quadraticCurveTo(x,y+h,x,y+h-r);
+  cx.lineTo(x,y+r); cx.quadraticCurveTo(x,y,x+r,y);
+  cx.closePath();
+  if(fill){cx.fillStyle=fill;cx.fill();}
+  if(stroke){cx.strokeStyle=stroke;cx.lineWidth=sw;cx.stroke();}
+}
+
+// ─── Character drawing ─────────────────────────────────────────
+// dir: 1 = facing right, -1 = facing left
+// arm raised when ball is on their side
+function drawCharacter(padX, padY, padW, padH, dir, suitCol, ballSide){
+  // anchor: paddle mid
+  const pmidY = padY + padH/2;
+  const px = dir===1 ? padX+padW : padX; // body side edge
+
+  // feet Y = floor area bottom
+  const footY = H - 18;
+  // body proportions
+  const bodyH = 52, bodyW = 28;
+  const headR = 16;
+  const legH = 46, legW = 10;
+  const armW = 8, armLen = 34;
+
+  // body X center
+  const bx = dir===1 ? px+bodyW/2+4 : px-bodyW/2-4;
+
+  // legs
+  const legTopY = footY - legH;
+  cx.fillStyle='#1a1a2a'; // dark trousers
+  // left leg
+  rr(bx-legW-2, legTopY, legW, legH, 3, '#1a1a2a');
+  // right leg
+  rr(bx+2, legTopY, legW, legH, 3, '#1a1a2a');
+
+  // shoes
+  cx.fillStyle='#111';
+  // left shoe
+  cx.beginPath();
+  cx.ellipse(bx-legW/2-2+(dir===1?-3:3), footY+2, 10, 5, 0, 0, Math.PI*2);
+  cx.fill();
+  // right shoe
+  cx.beginPath();
+  cx.ellipse(bx+legW/2+2+(dir===1?-3:3), footY+2, 10, 5, 0, 0, Math.PI*2);
+  cx.fill();
+
+  // suit jacket body
+  const jacketY = legTopY - bodyH;
+  rr(bx-bodyW/2, jacketY, bodyW, bodyH, 5, suitCol);
+
+  // lapels / shirt
+  // white shirt stripe
+  cx.fillStyle='#e8e2d4';
+  cx.beginPath();
+  cx.moveTo(bx-5, jacketY+4);
+  cx.lineTo(bx+5, jacketY+4);
+  cx.lineTo(bx+3, jacketY+bodyH-4);
+  cx.lineTo(bx-3, jacketY+bodyH-4);
+  cx.closePath(); cx.fill();
+
+  // tie
+  cx.fillStyle='#8b1a1a';
+  cx.beginPath();
+  cx.moveTo(bx-3,jacketY+6);
+  cx.lineTo(bx+3,jacketY+6);
+  cx.lineTo(bx+4,jacketY+bodyH-6);
+  cx.lineTo(bx,jacketY+bodyH-2);
+  cx.lineTo(bx-4,jacketY+bodyH-6);
+  cx.closePath(); cx.fill();
+
+  // pocket square
+  cx.fillStyle='#e8e2d4';
+  const psx = dir===1 ? bx-bodyW/2+4 : bx+bodyW/2-12;
+  rr(psx, jacketY+8, 8, 5, 1, '#c9a84c');
+  cx.fillStyle='#c9a84c';
+  // small triangle poke
+  cx.beginPath();
+  cx.moveTo(psx+2,jacketY+8);
+  cx.lineTo(psx+6,jacketY+8);
+  cx.lineTo(psx+4,jacketY+5);
+  cx.fill();
+
+  // jacket buttons
+  for(let i=0;i<3;i++){
+    cx.beginPath();
+    cx.arc(bx, jacketY+bodyH-10-i*12, 2, 0, Math.PI*2);
+    cx.fillStyle='#c9a84c'; cx.fill();
+  }
+
+  // jacket outline
+  rr(bx-bodyW/2, jacketY, bodyW, bodyH, 5, null, '#0a0a12', 1.5);
+
+  // ARMS
+  // paddle arm (toward center)
+  const armBaseY = jacketY + 10;
+  const armEndX  = dir===1 ? padX+padW+4 : padX-4;
+  // slight raise based on ball position (animate feel)
+  const ballClose = (dir===1 && ballSide==='left') || (dir===-1 && ballSide==='right');
+  const armAngle  = dir===1
+    ? (ballClose ? -0.5 : -0.25)
+    : (ballClose ? Math.PI+0.5 : Math.PI+0.25);
+
+  cx.strokeStyle=suitCol; cx.lineWidth=armW; cx.lineCap='round';
+  cx.beginPath();
+  cx.moveTo(bx+(dir===1?-bodyW/2+2:bodyW/2-2), armBaseY);
+  // elbow
+  const elbX = bx+(dir===1?-bodyW/2-10:bodyW/2+10);
+  const elbY = armBaseY+(ballClose?-8:4);
+  cx.lineTo(elbX, elbY);
+  cx.lineTo(armEndX, padY+(ballClose?padH*.3:padH*.5));
+  cx.stroke();
+  // cuff
+  cx.strokeStyle='#e8e2d4'; cx.lineWidth=5;
+  cx.beginPath();
+  cx.moveTo(elbX+(dir===1?-8:8), elbY+(ballClose?-4:2));
+  cx.lineTo(armEndX, padY+(ballClose?padH*.3:padH*.5));
+  cx.stroke();
+
+  // other arm (idle / gesturing)
+  cx.strokeStyle=suitCol; cx.lineWidth=armW; cx.lineCap='round';
+  cx.beginPath();
+  cx.moveTo(bx+(dir===1?bodyW/2-2:-bodyW/2+2), armBaseY);
+  cx.lineTo(bx+(dir===1?bodyW/2+18:-bodyW/2-18), armBaseY+20);
+  cx.stroke();
+
+  // neck
+  cx.fillStyle='#d4a574';
+  rr(bx-5, jacketY-10, 10, 12, 3, '#d4a574');
+
+  // head
+  cx.beginPath();
+  cx.arc(bx, jacketY-headR-8, headR, 0, Math.PI*2);
+  cx.fillStyle='#d4a574'; cx.fill();
+
+  // hair
+  cx.fillStyle='#2a1a0a';
+  cx.beginPath();
+  cx.arc(bx, jacketY-headR-8, headR, Math.PI, 0);
+  cx.fill();
+  // side part
+  cx.fillStyle='#3a2a10';
+  cx.beginPath();
+  cx.arc(bx+(dir===1?4:-4), jacketY-headR-8-headR*.3, headR*.8, Math.PI, 0);
+  cx.fill();
+
+  // eyes
+  const eyeY = jacketY-headR-8;
+  const eyeOff = dir===1?4:-4;
+  cx.fillStyle='#1a0a0a';
+  cx.beginPath(); cx.arc(bx+eyeOff-3,eyeY+1,2,0,Math.PI*2); cx.fill();
+  cx.beginPath(); cx.arc(bx+eyeOff+3,eyeY+1,2,0,Math.PI*2); cx.fill();
+
+  // mouth (smile if winning)
+  cx.strokeStyle='#6a3a1a'; cx.lineWidth=1.5; cx.lineCap='round';
+  cx.beginPath();
+  if(celebrating==='left'&&dir===1||celebrating==='right'&&dir===-1){
+    cx.arc(bx+eyeOff,eyeY+5,5,-0.3,Math.PI+0.3);
+  } else {
+    cx.moveTo(bx+eyeOff-4,eyeY+6);cx.lineTo(bx+eyeOff+4,eyeY+6);
+  }
+  cx.stroke();
+
+  // glasses
+  cx.strokeStyle='#222'; cx.lineWidth=1.2;
+  cx.beginPath();
+  cx.arc(bx+eyeOff-3,eyeY+1,4,0,Math.PI*2); cx.stroke();
+  cx.beginPath();
+  cx.arc(bx+eyeOff+3,eyeY+1,4,0,Math.PI*2); cx.stroke();
+  cx.beginPath();
+  cx.moveTo(bx+eyeOff-3+4,eyeY+1);cx.lineTo(bx+eyeOff+3-4,eyeY+1); cx.stroke();
+  // temple
+  cx.beginPath();
+  cx.moveTo(bx+eyeOff+3+4,eyeY+1);cx.lineTo(bx+eyeOff+3+8,eyeY-2); cx.stroke();
+  cx.beginPath();
+  cx.moveTo(bx+eyeOff-3-4,eyeY+1);cx.lineTo(bx+eyeOff-3-8,eyeY-2); cx.stroke();
+}
+
+// ─── Main draw ─────────────────────────────────────────────────
+function draw(){
+  // background — green felt table
+  cx.fillStyle='#0d1f0f';
+  cx.fillRect(0,0,W,H);
+
+  // table felt texture lines
+  for(let i=0;i<H;i+=28){
+    cx.strokeStyle='rgba(20,60,20,.4)'; cx.lineWidth=1;
+    cx.beginPath(); cx.moveTo(0,i); cx.lineTo(W,i); cx.stroke();
+  }
+
+  // table edge highlight top/bottom
+  cx.fillStyle='#0a1a0c';
+  cx.fillRect(0,0,W,6);
+  cx.fillRect(0,H-6,W,6);
+
+  // net
+  const netX=W/2;
+  cx.strokeStyle='#e8e2d4'; cx.lineWidth=3;
+  cx.beginPath(); cx.moveTo(netX,0); cx.lineTo(netX,H); cx.stroke();
+  // net posts
+  rr(netX-4,0,8,14,3,'#c8b87a');
+  rr(netX-4,H-14,8,14,3,'#c8b87a');
+  // net mesh lines
+  cx.strokeStyle='rgba(232,226,212,.3)'; cx.lineWidth=1;
+  for(let y=14;y<H-14;y+=12){
+    cx.beginPath(); cx.moveTo(netX-3,y); cx.lineTo(netX+3,y); cx.stroke();
+  }
+
+  // determine ball side
+  const ballSide = ball.x < W/2 ? 'left' : 'right';
+
+  // draw characters (behind paddles)
+  drawCharacter(lp.x, lp.y, lp.w, lp.h, 1, '#1e2a4a', ballSide);
+  drawCharacter(rp.x, rp.y, rp.w, rp.h,-1, '#2a1a3a', ballSide);
+
+  // paddles (ping pong paddle style)
+  drawPaddle(lp,'#c8401a','#8b1a0a');
+  drawPaddle(rp,'#1a5ec8','#0a2a8b');
+
+  // ball trail
+  ball.trail.forEach((p,i)=>{
+    const a=(i/ball.trail.length)*.35;
+    const r=BR*(i/ball.trail.length)*.65;
+    cx.beginPath(); cx.arc(p.x,p.y,r,0,Math.PI*2);
+    cx.fillStyle=`rgba(220,40,40,${a})`; cx.fill();
+  });
+
+  // ball — red
+  cx.beginPath(); cx.arc(ball.x,ball.y,BR,0,Math.PI*2);
+  cx.fillStyle='#e82020';
+  cx.shadowColor='#ff6060'; cx.shadowBlur=18;
+  cx.fill(); cx.shadowBlur=0;
+  // ball shine
+  cx.beginPath(); cx.arc(ball.x-2,ball.y-2,BR*.38,0,Math.PI*2);
+  cx.fillStyle='rgba(255,255,255,.45)'; cx.fill();
+
+  // particles
+  particles.forEach(p=>{
+    const alpha=Math.floor(p.life*255).toString(16).padStart(2,'0');
+    cx.beginPath(); cx.arc(p.x,p.y,3*p.life,0,Math.PI*2);
+    cx.fillStyle=p.color+alpha; cx.fill();
+  });
+
+  // scores
+  cx.textAlign='center';
+  cx.font='bold 56px Georgia';
+  cx.fillStyle='rgba(10,30,10,.8)';
+  cx.fillText(scores.l,W/2-90,66);
+  cx.fillText(scores.r,W/2+90,66);
+  cx.fillStyle='#c9a84c';
+  cx.fillText(scores.l,W/2-90,64);
+  cx.fillText(scores.r,W/2+90,64);
+
+  // player labels
+  cx.font='10px Courier New';
+  cx.letterSpacing='.12em';
+  cx.fillStyle='#2a3a2a';
+  cx.fillText(mode===2?'P1':'YOU', W/2-90, 82);
+  cx.fillText(mode===2?'P2':'CPU', W/2+90, 82);
+
+  // pause
+  if(paused){
+    cx.fillStyle='rgba(0,0,0,.6)'; cx.fillRect(0,0,W,H);
+    cx.fillStyle='#e8e2d4'; cx.font='14px Courier New'; cx.textAlign='center';
+    cx.fillText('PAUSED  ·  P to resume',W/2,H/2);
+  }
+}
+
+function drawPaddle(p, face, edge){
+  // handle
+  const hx = p.x===lp.x ? p.x+p.w : p.x-8;
+  rr(hx, p.y+p.h/2-6, 8, 26, 3, '#5a3a1a');
+  // face
+  rr(p.x, p.y, p.w, p.h, 6, face, edge, 2);
+  // rubber lines
+  cx.strokeStyle='rgba(0,0,0,.2)'; cx.lineWidth=1;
+  for(let y=p.y+8;y<p.y+p.h-6;y+=8){
+    cx.beginPath(); cx.moveTo(p.x+2,y); cx.lineTo(p.x+p.w-2,y); cx.stroke();
+  }
+}
+
+// ─── Loop ──────────────────────────────────────────────────────
+function loop(){
+  if(!running||paused) return;
+  update(); draw();
+  animId=requestAnimationFrame(loop);
+}
+
+// initial idle canvas
+(function(){
+  cx.fillStyle='#0d1f0f'; cx.fillRect(0,0,W,H);
+  for(let i=0;i<H;i+=28){
+    cx.strokeStyle='rgba(20,60,20,.4)'; cx.lineWidth=1;
+    cx.beginPath(); cx.moveTo(0,i); cx.lineTo(W,i); cx.stroke();
+  }
+})();
+</script>
+</body>
+</html>
